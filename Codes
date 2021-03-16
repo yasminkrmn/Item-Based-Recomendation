@@ -1,0 +1,153 @@
+#############################################
+# PROJECT: Item Based Recommender System and AB Testing
+#############################################
+# ---------------------------------------------------------------------
+# Preprocessing of Data
+
+import pandas as pd
+from helpers.eda import *
+
+
+def create_user_movie_df():
+    import pandas as pd
+    movie = pd.read_csv("datasets/movie.csv")
+    rating = pd.read_csv("datasets/rating.csv")
+    df = movie.merge(rating, how="left", on="movieId")
+    df['year_movie'] = df.title.str.extract('(\(\d\d\d\d\))', expand=False)
+    df['year_movie'] = df.year_movie.str.extract('(\d\d\d\d)', expand=False)
+    df['title'] = df.title.str.replace('(\(\d\d\d\d\))', '')
+    df['title'] = df['title'].apply(lambda x: x.strip())
+    df["genre"] = df["genres"].apply(lambda x: x.split("|")[0])
+    df.drop("genres", inplace=True, axis=1)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format='%Y-%m-%d')
+    df["year"] = df["timestamp"].dt.year
+    df["month"] = df["timestamp"].dt.month
+    df["day"] = df["timestamp"].dt.day
+    return df
+
+
+user_movie_df = create_user_movie_df()
+df = user_movie_df.copy()
+
+# ---------------------------------------------------------------------
+# userId == 108170
+
+
+df_user = df[df["userId"] == 108170]
+df_user.head(2)
+
+df_user.groupby("title").agg({"rating": "max", "timestamp": "max"}).sort_values("timestamp", ascending=False).head(10)
+#                              rating            timestamp
+# title
+# Evil Dead II (Dead by Dawn)     4.5  2005-06-11 05:02:02
+# Carlito's Way                   4.5  2005-06-11 05:01:42
+# Support Your Local Sheriff!     4.0  2005-06-11 04:59:25
+# Easy Rider                      4.5  2005-06-11 04:59:16
+# Wild at Heart                   5.0  2005-06-11 04:59:10
+
+# ---------------------------------------------------------------------
+# User Movie Dfs
+
+a = pd.DataFrame(df["title"].value_counts())
+rare_movies = a[a["title"] <= 5000].index
+common_movies = df[~df["title"].isin(rare_movies)]
+from_2005_movies = common_movies[common_movies["year"] >= 2005]
+until_2005_movies = common_movies[common_movies["year"] < 2005]
+
+common_movies = common_movies.pivot_table(index=["userId"], columns=["title"], values="rating")
+len(common_movies.columns)
+
+user_movie_2005_df = from_2005_movies.pivot_table(index=["userId"], columns=["title"], values="rating")
+len(user_movie_2005_df.columns)
+
+user_movie_1995_df = until_2005_movies.pivot_table(index=["userId"], columns=["title"], values="rating")
+len(user_movie_1995_df.columns)
+
+# ---------------------------------------------------------------------
+# Item-Based Movie Recommendation by Correlation
+
+# All Time (Datayı 5000 ve üstü olarak daralttığım için sonuc farklı cıkmakta:
+movie = common_movies["Leaving Las Vegas"]
+
+common_movies.corrwith(movie).sort_values(ascending=False).head(6)
+# Leaving Las Vegas                  1.000000
+# Requiem for a Dream                0.335476
+# Monster's Ball                     0.333522
+# 21 Grams                           0.321224
+# Boogie Nights                      0.318249
+# Machinist, The (Maquinista, El)    0.299770
+
+
+# From 2005
+movie_2005 = user_movie_2005_df["Matrix, The"]
+
+user_movie_2005_df.corrwith(movie_2005).sort_values(ascending=False).head(6)
+
+movie_2005 = user_movie_2005_df["Matrix, The"]
+
+user_movie_2005_df.corrwith(movie_2005).sort_values(ascending=False).head(6)
+# title
+# Matrix, The                   1.000000
+# Matrix Reloaded, The          0.525163
+# Matrix Revolutions, The       0.469661
+# Terminator 2: Judgment Day    0.368452
+# Stargate                      0.364153
+# Mission: Impossible           0.358894
+
+# Between 1995 - 2005
+movie_1995 = user_movie_1995_df["Matrix, The"]
+
+user_movie_1995_df.corrwith(movie_2005).sort_values(ascending=False).head(6)
+# title
+# Ghost and the Darkness, The                 0.586149
+# Spawn                                       0.567700
+# Sideways                                    0.565572
+# Evil Dead II (Dead by Dawn)                 0.551634
+# Emperor's New Groove, The                   0.542377
+# Three Colors: White (Trzy kolory: Bialy)    0.540853
+# dtype: float64
+
+# ---------------------------------------------------------------------
+# AB Test
+
+The_Matrix_2005 = from_2005_movies[from_2005_movies.title == "Matrix, The"]
+The_Matrix_2005.userId.nunique()
+
+The_Matrix_1995 = until_2005_movies[until_2005_movies.title == "Matrix, The"]
+The_Matrix_1995.userId.nunique()
+
+A = pd.DataFrame()
+B = pd.DataFrame()
+
+A["2005"] = The_Matrix_2005["rating"]
+A = A.reset_index()
+A = A.drop("index", axis=1)
+
+B["1995"] = The_Matrix_1995.rating
+B = B.reset_index()
+B = B.drop("index", axis=1)
+
+AB_test = pd.DataFrame()
+AB_test["2005"] = A["2005"]
+AB_test["1995"] = B["1995"]
+
+# NORMALITY ASSUMPTION
+from scipy.stats import shapiro
+
+shapiro(AB_test["2005"])
+# ShapiroResult(statistic=0.838533341884613, pvalue=0.0)
+shapiro(AB_test["1995"])
+# ShapiroResult(statistic=0.7776083946228027, pvalue=0.0)
+
+# HOMOGENEITY ASSUMPTION
+from scipy import stats
+
+stats.levene(AB_test["2005"], AB_test["1995"])
+# LeveneResult(statistic=155.24391727468014, pvalue=1.4462641954615717e-35)
+
+# AB TESTING
+test_istatistigi, pvalue = stats.mannwhitneyu(AB_test["2005"], AB_test["1995"])
+print('Test Statistics = %.4f, p-value = %.4f' % (test_istatistigi, pvalue))
+# Test Statistics = 171317207.0000, p-value = 0.0000
+# H0: M1 = M2
+# According to test result, HO is rejected.
